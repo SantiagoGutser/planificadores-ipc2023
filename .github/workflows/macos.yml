@@ -1,0 +1,125 @@
+# Instala (compila) y prueba cuatro planificadores de la IPC 2023 en un Mac de GitHub Actions.
+# Cada planificador corre en su propia máquina macOS y deja su registro como artefacto descargable.
+name: Planificadores IPC 2023 en macOS
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  instalar-y-probar:
+    name: ${{ matrix.nombre }}
+    runs-on: macos-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - nombre: Scorpion 2023
+            repo: planner25
+            config: release
+            alias: seq-opt-scorpion-2023
+            opciones: --transform-task preprocess-h2 --transform-task-options h2_time_limit,300
+          - nombre: Scorpion Maidu
+            repo: planner8
+            config: release
+            alias: seq-sat-maidu
+            opciones: --transform-task preprocess-h2 --transform-task-options h2_time_limit,180
+          - nombre: DecStar 2023
+            repo: planner15
+            config: release64nolp
+            alias: seq-agl-decstar
+            opciones: --build release64nolp
+          - nombre: FD Stone Soup 2023
+            repo: planner28
+            config: release
+            alias: seq-sat-fdss-2023
+            opciones: ""
+
+    steps:
+      - name: Descargar los problemas de prueba
+        uses: actions/checkout@v4
+
+      - name: Información del Mac
+        run: |
+          sw_vers
+          echo "Arquitectura: $(uname -m)"
+          echo "Procesador: $(sysctl -n machdep.cpu.brand_string)"
+          echo "Núcleos: $(sysctl -n hw.ncpu) | RAM: $(( $(sysctl -n hw.memsize) / 1073741824 )) GB"
+          cmake --version | head -1
+          clang++ --version | head -1
+          python3 --version
+
+      - name: Clonar el planificador (rama latest)
+        run: git clone --depth 1 -b latest https://github.com/ipc2023-classical/${{ matrix.repo }}.git planner
+
+      - name: Instalar gringo (solo Scorpion Maidu)
+        if: matrix.repo == 'planner8'
+        run: brew install clingo && gringo --version | head -1
+
+      - name: Compilar
+        id: compilar
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cd planner
+          SECONDS=0
+          python3 build.py ${{ matrix.config }} -j3 2>&1 | tee ../compilacion.log
+          echo "Tiempo de compilación: ${SECONDS} s" | tee -a ../compilacion.log
+
+      - name: Compilar sin la opción -m64 (si la anterior falló)
+        id: compilar2
+        if: steps.compilar.outcome == 'failure' && matrix.repo == 'planner15'
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cd planner
+          echo 'releasemac = ["-DCMAKE_BUILD_TYPE=Release", "-DALLOW_64_BIT=True", "-DUSE_LP=NO"]' >> build_configs.py
+          SECONDS=0
+          python3 build.py releasemac -j3 2>&1 | tee ../compilacion2.log
+          echo "Tiempo de compilación: ${SECONDS} s" | tee -a ../compilacion2.log
+
+      - name: Resolver Gripper (tarea 3)
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          OPC="${{ matrix.opciones }}"
+          if [ "${{ steps.compilar2.outcome }}" = "success" ]; then OPC="--build releasemac"; fi
+          SECONDS=0
+          python3 planner/fast-downward.py $OPC --overall-time-limit 30m --alias ${{ matrix.alias }} \
+            --plan-file sas_plan prueba/gripper-domain.pddl prueba/gripper-p03.pddl 2>&1 | tee ejecucion_gripper.log
+          echo "Tiempo total: ${SECONDS} s" | tee -a ejecucion_gripper.log
+
+      - name: Resolver Logistics (solo DecStar, para ver la búsqueda desacoplada)
+        if: matrix.repo == 'planner15'
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          OPC="${{ matrix.opciones }}"
+          if [ "${{ steps.compilar2.outcome }}" = "success" ]; then OPC="--build releasemac"; fi
+          python3 planner/fast-downward.py $OPC --overall-time-limit 5m --alias ${{ matrix.alias }} \
+            --plan-file sas_plan_logistics prueba/logistics-domain.pddl prueba/logistics-p05.pddl 2>&1 | tee ejecucion_logistics.log
+
+      - name: Resumen
+        if: always()
+        run: |
+          {
+            echo "## ${{ matrix.nombre }}"
+            echo '```'
+            sw_vers | head -2
+            grep -h "Built configuration\|Tiempo de compilación\|error:" compilacion*.log 2>/dev/null | tail -6
+            grep -h "Solution found\|Plan cost\|Exit codes\|Planner time\|Tiempo total" ejecucion_*.log 2>/dev/null | head -12
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Guardar registros
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: registros-${{ matrix.repo }}
+          path: |
+            compilacion*.log
+            ejecucion_*.log
+            sas_plan*
+          if-no-files-found: ignore
