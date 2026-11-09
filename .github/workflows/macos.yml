@@ -55,16 +55,15 @@ jobs:
           clang++ --version | head -1
           python3 --version
 
-      - name: Usar GCC como compilador
-        # El código de estos planificadores solo reconoce GCC o Clang; el AppleClang del Mac
-        # produce "Unsupported compiler", así que se compila con GCC de Homebrew.
+      - name: Usar GCC 13 como compilador
+        # El código de estos planificadores solo reconoce GCC o Clang: con el AppleClang del Mac
+        # da "Unsupported compiler", y con GCC 15 (el de Homebrew) falla por ser más estricto.
+        # GCC 13 es la versión con la que compilaron sin problemas en Linux.
         run: |
-          GXX=$(ls /opt/homebrew/bin/g++-[0-9]* 2>/dev/null | sort -V | tail -1)
-          if [ -z "$GXX" ]; then brew install gcc; GXX=$(ls /opt/homebrew/bin/g++-[0-9]* | sort -V | tail -1); fi
-          GCC=${GXX/g++-/gcc-}
-          echo "CC=$GCC" >> "$GITHUB_ENV"
-          echo "CXX=$GXX" >> "$GITHUB_ENV"
-          $GXX --version | head -1
+          brew install gcc@13
+          echo "CC=$(brew --prefix gcc@13)/bin/gcc-13" >> "$GITHUB_ENV"
+          echo "CXX=$(brew --prefix gcc@13)/bin/g++-13" >> "$GITHUB_ENV"
+          "$(brew --prefix gcc@13)/bin/g++-13" --version | head -1
 
       - name: Clonar el planificador (rama latest)
         run: git clone --depth 1 -b latest https://github.com/ipc2023-classical/${{ matrix.repo }}.git planner
