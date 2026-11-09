@@ -12,6 +12,10 @@ jobs:
     name: ${{ matrix.nombre }}
     runs-on: macos-latest
     timeout-minutes: 60
+    env:
+      # CMake 4 ya no acepta proyectos que piden compatibilidad con versiones < 3.5;
+      # esta variable es la solución que sugiere el propio mensaje de error.
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
     strategy:
       fail-fast: false
       matrix:
