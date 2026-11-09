@@ -55,18 +55,17 @@ jobs:
           clang++ --version | head -1
           python3 --version
 
-      - name: Usar GCC 13 como compilador
-        # El código de estos planificadores solo reconoce GCC o Clang: con el AppleClang del Mac
-        # da "Unsupported compiler", y con GCC 15 (el de Homebrew) falla por ser más estricto.
-        # GCC 13 es la versión con la que compilaron sin problemas en Linux.
-        run: |
-          brew install gcc@13
-          echo "CC=$(brew --prefix gcc@13)/bin/gcc-13" >> "$GITHUB_ENV"
-          echo "CXX=$(brew --prefix gcc@13)/bin/g++-13" >> "$GITHUB_ENV"
-          "$(brew --prefix gcc@13)/bin/g++-13" --version | head -1
-
       - name: Clonar el planificador (rama latest)
         run: git clone --depth 1 -b latest https://github.com/ipc2023-classical/${{ matrix.repo }}.git planner
+
+      - name: Reconocer el compilador de Apple
+        # Con CMake 4, el compilador del Mac se identifica como "AppleClang" y el script de
+        # Fast Downward solo acepta "Clang" (da "Unsupported compiler"). GCC 15 y GCC 13 de
+        # Homebrew tampoco sirvieron (código demasiado antiguo / incompatibles con el SDK de macOS 26).
+        # Cambio mínimo: aceptar cualquier compilador cuyo nombre contenga "Clang".
+        run: |
+          sed -i '' 's/STREQUAL "Clang"/MATCHES "Clang"/g' planner/src/cmake_modules/FastDownwardMacros.cmake
+          grep -n 'MATCHES "Clang"' planner/src/cmake_modules/FastDownwardMacros.cmake
 
       - name: Instalar gringo (solo Scorpion Maidu)
         if: matrix.repo == 'planner8'
