@@ -32,9 +32,9 @@ jobs:
             opciones: --transform-task preprocess-h2 --transform-task-options h2_time_limit,180
           - nombre: DecStar 2023
             repo: planner15
-            config: release64nolp
+            config: releasemac
             alias: seq-agl-decstar
-            opciones: --build release64nolp
+            opciones: --build releasemac
           - nombre: FD Stone Soup 2023
             repo: planner28
             config: release
@@ -67,6 +67,24 @@ jobs:
           sed -i '' 's/STREQUAL "Clang"/MATCHES "Clang"/g' planner/src/cmake_modules/FastDownwardMacros.cmake
           grep -n 'MATCHES "Clang"' planner/src/cmake_modules/FastDownwardMacros.cmake
 
+      - name: Corregir tl::optional (Scorpion, Maidu y Stone Soup)
+        # El Clang de Apple revisa plantillas que nunca se usan y rechaza una línea de la librería
+        # externa tl::optional (optional<T&>::emplace). Se reemplaza por la asignación equivalente.
+        if: matrix.repo != 'planner15'
+        run: |
+          F=planner/src/search/ext/optional.hh
+          sed -n '2261p' $F
+          sed -i '' '2261s/this->construct(std::forward<Args>(args)...);/m_value = std::addressof(args...);/' $F
+          sed -n '2261p' $F
+
+      - name: Configuración de compilación para macOS (solo DecStar)
+        # Sin -m64 (no aplica en Apple Silicon), sin programación lineal y permitiendo
+        # std::unary_function, que usa su versión antigua de Boost y que libc++ ya eliminó.
+        if: matrix.repo == 'planner15'
+        run: |
+          echo 'releasemac = ["-DCMAKE_BUILD_TYPE=Release", "-DALLOW_64_BIT=True", "-DUSE_LP=NO", "-DCMAKE_CXX_FLAGS=-D_LIBCPP_ENABLE_CXX17_REMOVED_UNARY_BINARY_FUNCTION"]' >> planner/build_configs.py
+          tail -1 planner/build_configs.py
+
       - name: Instalar gringo (solo Scorpion Maidu)
         if: matrix.repo == 'planner8'
         run: brew install clingo && gringo --version | head -1
@@ -81,24 +99,11 @@ jobs:
           python3 build.py ${{ matrix.config }} -j3 2>&1 | tee ../compilacion.log
           echo "Tiempo de compilación: ${SECONDS} s" | tee -a ../compilacion.log
 
-      - name: Compilar sin la opción -m64 (si la anterior falló)
-        id: compilar2
-        if: steps.compilar.outcome == 'failure' && matrix.repo == 'planner15'
-        continue-on-error: true
-        run: |
-          set -o pipefail
-          cd planner
-          echo 'releasemac = ["-DCMAKE_BUILD_TYPE=Release", "-DALLOW_64_BIT=True", "-DUSE_LP=NO"]' >> build_configs.py
-          SECONDS=0
-          python3 build.py releasemac -j3 2>&1 | tee ../compilacion2.log
-          echo "Tiempo de compilación: ${SECONDS} s" | tee -a ../compilacion2.log
-
       - name: Resolver Gripper (tarea 3)
         continue-on-error: true
         run: |
           set -o pipefail
           OPC="${{ matrix.opciones }}"
-          if [ "${{ steps.compilar2.outcome }}" = "success" ]; then OPC="--build releasemac"; fi
           SECONDS=0
           python3 planner/fast-downward.py $OPC --overall-time-limit 30m --alias ${{ matrix.alias }} \
             --plan-file sas_plan prueba/gripper-domain.pddl prueba/gripper-p03.pddl 2>&1 | tee ejecucion_gripper.log
@@ -110,7 +115,6 @@ jobs:
         run: |
           set -o pipefail
           OPC="${{ matrix.opciones }}"
-          if [ "${{ steps.compilar2.outcome }}" = "success" ]; then OPC="--build releasemac"; fi
           python3 planner/fast-downward.py $OPC --overall-time-limit 5m --alias ${{ matrix.alias }} \
             --plan-file sas_plan_logistics prueba/logistics-domain.pddl prueba/logistics-p05.pddl 2>&1 | tee ejecucion_logistics.log
 
