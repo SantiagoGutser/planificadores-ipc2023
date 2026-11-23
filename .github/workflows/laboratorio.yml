@@ -1,0 +1,140 @@
+# Laboratorio STRIPS/PDDL (robot de limpieza): resuelve el problema base y las dos variantes
+# con los cuatro planificadores de la IPC 2023 en un Mac de GitHub Actions.
+name: Laboratorio PDDL en macOS
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['laboratorio/**', '.github/workflows/laboratorio.yml']
+
+jobs:
+  resolver:
+    name: ${{ matrix.nombre }}
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - nombre: Scorpion 2023
+            repo: planner25
+            config: release
+            alias: seq-opt-scorpion-2023
+            opciones: --transform-task preprocess-h2 --transform-task-options h2_time_limit,300
+          - nombre: Scorpion Maidu
+            repo: planner8
+            config: release
+            alias: seq-sat-maidu
+            opciones: --transform-task preprocess-h2 --transform-task-options h2_time_limit,180
+          - nombre: DecStar 2023
+            repo: planner15
+            config: releasemac
+            alias: seq-agl-decstar
+            opciones: --build releasemac
+          - nombre: FD Stone Soup 2023
+            repo: planner28
+            config: release
+            alias: seq-sat-fdss-2023
+            opciones: ""
+
+    steps:
+      - name: Descargar el dominio y los problemas del laboratorio
+        uses: actions/checkout@v4
+
+      - name: Información del Mac
+        run: |
+          sw_vers
+          echo "Arquitectura: $(uname -m)"
+          echo "Procesador: $(sysctl -n machdep.cpu.brand_string)"
+          echo "Núcleos: $(sysctl -n hw.ncpu) | RAM: $(( $(sysctl -n hw.memsize) / 1073741824 )) GB"
+          cmake --version | head -1
+          clang++ --version | head -1
+          python3 --version
+
+      - name: Clonar el planificador (rama latest)
+        run: git clone --depth 1 -b latest https://github.com/ipc2023-classical/${{ matrix.repo }}.git planner
+
+      - name: Reconocer el compilador de Apple
+        # Con CMake 4, el compilador del Mac se identifica como "AppleClang" y el script de
+        # Fast Downward solo acepta "Clang" (da "Unsupported compiler"). GCC 15 y GCC 13 de
+        # Homebrew tampoco sirvieron (código demasiado antiguo / incompatibles con el SDK de macOS 26).
+        # Cambio mínimo: aceptar cualquier compilador cuyo nombre contenga "Clang".
+        run: |
+          sed -i '' 's/STREQUAL "Clang"/MATCHES "Clang"/g' planner/src/cmake_modules/FastDownwardMacros.cmake
+          grep -n 'MATCHES "Clang"' planner/src/cmake_modules/FastDownwardMacros.cmake
+
+      - name: Corregir tl::optional (Scorpion, Maidu y Stone Soup)
+        # El Clang de Apple revisa plantillas que nunca se usan y rechaza una línea de la librería
+        # externa tl::optional (optional<T&>::emplace). Se reemplaza por la asignación equivalente.
+        if: matrix.repo != 'planner15'
+        run: |
+          F=planner/src/search/ext/optional.hh
+          sed -n '2261p' $F
+          sed -i '' '2261s/this->construct(std::forward<Args>(args)...);/m_value = std::addressof(args...);/' $F
+          sed -n '2261p' $F
+
+      - name: Configuración de compilación para macOS (solo DecStar)
+        # Sin -m64 (no aplica en Apple Silicon), sin programación lineal y permitiendo
+        # std::unary_function y std::random_shuffle, que usa su código antiguo y que libc++ ya eliminó.
+        # -fno-access-control: el Clang de Apple rechaza un acceso a un miembro protegido que GCC sí permitía.
+        if: matrix.repo == 'planner15'
+        run: |
+          echo 'releasemac = ["-DCMAKE_BUILD_TYPE=Release", "-DALLOW_64_BIT=True", "-DUSE_LP=NO", "-DCMAKE_CXX_FLAGS=-D_LIBCPP_ENABLE_CXX17_REMOVED_UNARY_BINARY_FUNCTION -D_LIBCPP_ENABLE_CXX17_REMOVED_RANDOM_SHUFFLE -fno-access-control"]' >> planner/build_configs.py
+          tail -1 planner/build_configs.py
+
+      - name: Instalar gringo (solo Scorpion Maidu)
+        if: matrix.repo == 'planner8'
+        run: brew install clingo && gringo --version | head -1
+
+      - name: Compilar
+        id: compilar
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cd planner
+          SECONDS=0
+          python3 build.py ${{ matrix.config }} -j3 2>&1 | tee ../compilacion.log
+          echo "Tiempo de compilación: ${SECONDS} s" | tee -a ../compilacion.log
+
+      - name: Resolver los tres problemas del laboratorio
+        continue-on-error: true
+        run: |
+          OPC="${{ matrix.opciones }}"
+          for P in problema problemav1 problemav2; do
+            echo "=================== $P ==================="
+            # /usr/bin/time -p mide el tiempo real de toda la ejecución (traducción + búsqueda)
+            /usr/bin/time -p python3 planner/fast-downward.py $OPC --overall-time-limit 10m \
+              --alias ${{ matrix.alias }} --plan-file plan_$P \
+              laboratorio/dominio.pddl laboratorio/$P.pddl > ejecucion_$P.log 2>&1
+            grep -h "Solution found\|Plan length\|Plan cost\|Expanded\|Search time\|Total time\|Planner time\|Exit codes\|^real" ejecucion_$P.log
+            for F in plan_$P*; do echo "--- $F"; cat "$F"; done
+          done
+
+      - name: Resumen
+        if: always()
+        run: |
+          {
+            echo "## ${{ matrix.nombre }}"
+            echo '```'
+            sw_vers | head -2
+            grep -h "Built configuration\|Tiempo de compilación" compilacion.log 2>/dev/null | tail -2
+            for P in problema problemav1 problemav2; do
+              echo "[$P]"
+              grep -h "Plan cost\|Planner time\|^real" ejecucion_$P.log 2>/dev/null
+            done
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Guardar registros y planes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: laboratorio-${{ matrix.repo }}
+          path: |
+            compilacion.log
+            ejecucion_*.log
+            plan_*
+          if-no-files-found: ignore
